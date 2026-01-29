@@ -1121,6 +1121,64 @@ async def _calculate_total_cost(work_dir: str, mode: str = None) -> float:
     return total_cost
 
 
+def _build_cost_breakdown(work_dir: str) -> dict:
+    """
+    Build detailed cost breakdown from work directory files.
+
+    Returns a dict matching the frontend's EnhanceInputCostData structure:
+    - ocr_cost: full OCR cost data (or null)
+    - summarization_costs: per-agent cost rows
+    - total_cost: combined total
+    - breakdown: { ocr_cost_usd, summarization_cost_usd }
+    """
+    import json
+    import glob
+
+    ocr_cost_data = None
+    ocr_cost_usd = 0.0
+    summarization_costs = []
+    summarization_cost_usd = 0.0
+
+    # Read OCR costs
+    ocr_cost_file = os.path.join(work_dir, 'ocr_cost.json')
+    if os.path.exists(ocr_cost_file):
+        try:
+            with open(ocr_cost_file, 'r', encoding='utf-8') as f:
+                ocr_cost_data = json.loads(f.read())
+            ocr_cost_usd = ocr_cost_data.get('total_cost_usd', 0) or 0
+        except Exception as e:
+            logger.warning(f"Failed to read OCR cost file: {e}")
+
+    # Read summarization costs from summaries/doc_*/cost/
+    summaries_pattern = os.path.join(work_dir, 'summaries', 'doc_*', 'cost', 'cost_report_*.json')
+    for cost_file in glob.glob(summaries_pattern):
+        try:
+            with open(cost_file, 'r', encoding='utf-8') as f:
+                content = f.read().replace(': NaN', ': null')
+                cost_data = json.loads(content)
+            if isinstance(cost_data, list):
+                for entry in cost_data:
+                    if isinstance(entry, dict) and entry.get('Agent') != 'Total':
+                        cost_val = entry.get('Cost ($)', 0)
+                        if isinstance(cost_val, (int, float)) and cost_val == cost_val:  # exclude NaN
+                            summarization_cost_usd += cost_val
+                            summarization_costs.append(entry)
+        except Exception as e:
+            logger.warning(f"Failed to read cost file {cost_file}: {e}")
+
+    total_cost = ocr_cost_usd + summarization_cost_usd
+
+    return {
+        "ocr_cost": ocr_cost_data,
+        "summarization_costs": summarization_costs,
+        "total_cost": total_cost,
+        "breakdown": {
+            "ocr_cost_usd": ocr_cost_usd,
+            "summarization_cost_usd": summarization_cost_usd,
+        }
+    }
+
+
 async def sync_backend_files_to_frontend(
     websocket: WebSocket,
     work_dir: str,
@@ -1630,18 +1688,33 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
         except Exception as e:
             logger.warning(f"Failed to calculate/store total cost: {e}")
 
+        # Build detailed cost breakdown for modes that have it
+        cost_breakdown = None
+        if mode in ('enhance-input', 'ocr'):
+            try:
+                cost_breakdown = _build_cost_breakdown(task_work_dir)
+                # Use the breakdown total if more accurate than _calculate_total_cost
+                if cost_breakdown['total_cost'] > total_cost:
+                    total_cost = cost_breakdown['total_cost']
+            except Exception as e:
+                logger.warning(f"Failed to build cost breakdown: {e}")
+
         # Send final results
+        result_data = {
+            "execution_time": execution_time,
+            "total_cost": total_cost,
+            "chat_history": getattr(results, 'chat_history', []) if hasattr(results, 'chat_history') else [],
+            "final_context": getattr(results, 'final_context', {}) if hasattr(results, 'final_context') else {},
+            "work_dir": task_work_dir,
+            "base_work_dir": work_dir,
+            "mode": mode,
+        }
+        if cost_breakdown:
+            result_data["cost_breakdown"] = cost_breakdown
+
         await websocket.send_json({
             "type": "result",
-            "data": {
-                "execution_time": execution_time,
-                "total_cost": total_cost,
-                "chat_history": getattr(results, 'chat_history', []) if hasattr(results, 'chat_history') else [],
-                "final_context": getattr(results, 'final_context', {}) if hasattr(results, 'final_context') else {},
-                "work_dir": task_work_dir,
-                "base_work_dir": work_dir,
-                "mode": mode  # Include mode so UI knows how to display results
-            }
+            "data": result_data
         })
 
         await websocket.send_json({
