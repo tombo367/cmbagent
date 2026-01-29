@@ -15,8 +15,16 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Install system dependencies
+# LaTeX is required for Denario paper mode (PDF compilation)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
+    texlive-latex-base \
+    texlive-latex-extra \
+    texlive-fonts-recommended \
+    texlive-fonts-extra \
+    texlive-science \
+    texlive-bibtex-extra \
+    latexmk \
     && rm -rf /var/lib/apt/lists/*
 
 # Copy the entire cmbagent package (needed for imports)
@@ -25,6 +33,14 @@ COPY cmbagent/ ./cmbagent/
 
 # Install cmbagent package with server dependencies
 RUN pip install -e ".[server]"
+
+# Install Denario from source (optional - enables research pipeline modes)
+# Copy denario/ into build context before building:
+#   cp -r ../Denario /path/to/cmbagent/denario-pkg
+# Or clone it:
+#   git clone https://github.com/CMBAgents/Denario.git denario-pkg
+COPY denario-pkg/ ./denario-pkg/
+RUN pip install ./denario-pkg/ || echo "WARNING: Denario not available, research pipeline modes disabled"
 
 # Copy backend code
 COPY backend/*.py ./backend/

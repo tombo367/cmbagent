@@ -1182,7 +1182,9 @@ def _build_cost_breakdown(work_dir: str) -> dict:
 async def sync_backend_files_to_frontend(
     websocket: WebSocket,
     work_dir: str,
-    mode: str = None
+    mode: str = None,
+    config: Dict[str, Any] = None,
+    user_id: str = None,
 ) -> tuple[int, list[dict]]:
     """
     Sync files from backend work directory to frontend.
@@ -1324,6 +1326,24 @@ async def sync_backend_files_to_frontend(
                     relative_path = os.path.relpath(file_path, work_dir)
                     await sync_file(file_path, relative_path)
 
+    # Sync Denario project files
+    denario_modes = {'idea-fast', 'literature-search', 'methods-fast', 'paper', 'review', 'keywords'}
+    if mode in denario_modes and config and user_id:
+        project_name = config.get("projectName", "default")
+        base_work_dir = os.path.dirname(work_dir)  # Go up from {base}/{user_id}/{task_id}
+        project_dir = os.path.join(base_work_dir, "denario", project_name)
+        if os.path.exists(project_dir):
+            logger.info(f"Syncing Denario project directory: {project_dir}")
+            for root, _, files in os.walk(project_dir):
+                for filename in files:
+                    file_path = os.path.join(root, filename)
+                    # Use denario/{projectName}/... as the relative path
+                    relative_path = os.path.join(
+                        "denario", project_name,
+                        os.path.relpath(file_path, project_dir)
+                    )
+                    await sync_file(file_path, relative_path)
+
     if files_synced > 0:
         logger.info(f"Synced {files_synced} files from backend to frontend (mode={mode})")
         await websocket.send_json({
@@ -1332,6 +1352,63 @@ async def sync_backend_files_to_frontend(
         })
 
     return files_synced, file_registry_entries
+
+
+def _build_denario_params(config: dict) -> dict:
+    """Construct params dict matching Denario's params.yaml schema."""
+    default = config.get("defaultModel", "gpt-4.1-2025-04-14")
+    formatter = config.get("defaultFormatterModel", "o3-mini-2025-01-31")
+    entry = lambda m, t=0.5: {"model": m, "temperature": t}
+    return {
+        "Idea module": {
+            "idea_sampler": entry(default, 1.0),
+            "idea_selector1": entry(default),
+            "idea_chooser": entry(default),
+            "idea_maker": entry(config.get("ideaMakerModel", default), 1.0),
+            "idea_hater": entry(config.get("ideaHaterModel", formatter)),
+        },
+        "Literature module": {
+            "literature": entry(default),
+            "summarizer": entry(default),
+        },
+        "Methods module": {
+            "methods": entry(default),
+            "improver": entry(default),
+            "reviewer1": entry(formatter),
+        },
+        "Paper module": {
+            "section_writer": entry(default),
+            "refiner": entry(default),
+        },
+        "Reviewer module": {
+            "reviewer1": entry(default),
+            "reviewer2": entry(default),
+            "meta_reviewer": entry(default),
+        },
+    }
+
+
+def _build_denario_keys():
+    """Build KeyManager from environment variables."""
+    from denario.key_manager import KeyManager
+    keys = KeyManager()
+    keys.get_keys_from_env()
+    return keys
+
+
+def _get_denario_project_dir(base_work_dir: str, user_id: str, project_name: str) -> str:
+    """Get or create persistent Denario project directory."""
+    project_dir = os.path.join(base_work_dir, user_id, "denario", project_name)
+    os.makedirs(project_dir, exist_ok=True)
+    return project_dir
+
+
+def _save_data_description(project_dir: str, text: str, iteration: int = 0):
+    """Save data description to Denario's expected location."""
+    input_dir = os.path.join(project_dir, "Project0", f"Iteration{iteration}", "input_files")
+    os.makedirs(input_dir, exist_ok=True)
+    with open(os.path.join(input_dir, "data_description.md"), "w") as f:
+        f.write(text)
 
 
 async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, config: Dict[str, Any], user: Optional[Any] = None, custom_executor: Optional[Any] = None):
@@ -1481,6 +1558,17 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                 "type": "output",
                 "data": f"⚙️ Configuration: Enhance Input mode - Max Workers={max_workers}, Max Depth={max_depth}"
             })
+        elif mode in ("idea-fast", "literature-search", "methods-fast", "paper", "review"):
+            project_name = config.get("projectName", "default")
+            await websocket.send_json({
+                "type": "output",
+                "data": f"⚙️ Configuration: Denario {mode} mode - Project={project_name}"
+            })
+        elif mode == "keywords":
+            await websocket.send_json({
+                "type": "output",
+                "data": f"⚙️ Configuration: Keywords mode - n={config.get('nKeywords', 5)}, type={config.get('keywordType', 'unesco')}"
+            })
         else:
             await websocket.send_json({
                 "type": "output",
@@ -1609,6 +1697,73 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                         max_workers=max_workers,
                         clear_work_dir=False
                     )
+                elif mode == "idea-fast":
+                    from denario.langgraph_agents.modules import idea_LG
+                    project_name = config.get("projectName", "default")
+                    project_dir = _get_denario_project_dir(work_dir, user_id, project_name)
+                    _save_data_description(project_dir, task, config.get("projectIteration", 0))
+                    results = idea_LG(
+                        project_dir=project_dir,
+                        keys=_build_denario_keys(),
+                        params=_build_denario_params(config),
+                        iterations=config.get("ideaIterations", 3),
+                        project_iteration=config.get("projectIteration", 0),
+                    )
+                elif mode == "literature-search":
+                    from denario.langgraph_agents.modules import literature_LG
+                    project_name = config.get("projectName", "default")
+                    project_dir = _get_denario_project_dir(work_dir, user_id, project_name)
+                    if task.strip():
+                        _save_data_description(project_dir, task, config.get("projectIteration", 0))
+                    results = literature_LG(
+                        project_dir=project_dir,
+                        keys=_build_denario_keys(),
+                        params=_build_denario_params(config),
+                        max_iterations=config.get("maxIterations", 10),
+                        project_iteration=config.get("projectIteration", 0),
+                    )
+                elif mode == "methods-fast":
+                    from denario.langgraph_agents.modules import methods_LG
+                    project_name = config.get("projectName", "default")
+                    project_dir = _get_denario_project_dir(work_dir, user_id, project_name)
+                    if task.strip():
+                        _save_data_description(project_dir, task, config.get("projectIteration", 0))
+                    results = methods_LG(
+                        project_dir=project_dir,
+                        keys=_build_denario_keys(),
+                        params=_build_denario_params(config),
+                        project_iteration=config.get("projectIteration", 0),
+                    )
+                elif mode == "paper":
+                    from denario.langgraph_agents.modules import paper_LG
+                    from denario.tools import Journal
+                    project_name = config.get("projectName", "default")
+                    project_dir = _get_denario_project_dir(work_dir, user_id, project_name)
+                    journal = getattr(Journal, config.get("journal", "NONE"), Journal.NONE)
+                    results = paper_LG(
+                        project_dir=project_dir,
+                        keys=_build_denario_keys(),
+                        params=_build_denario_params(config),
+                        journal=journal,
+                        add_citations=config.get("addCitations", False),
+                        writer=config.get("writer", "scientist"),
+                        project_iteration=config.get("projectIteration", 0),
+                    )
+                elif mode == "review":
+                    from denario.langgraph_agents.modules import reviewer_LG
+                    project_name = config.get("projectName", "default")
+                    project_dir = _get_denario_project_dir(work_dir, user_id, project_name)
+                    results = reviewer_LG(
+                        project_dir=project_dir,
+                        keys=_build_denario_keys(),
+                        params=_build_denario_params(config),
+                        pdf=config.get("pdfVersion", "v2"),
+                        project_iteration=config.get("projectIteration", 0),
+                    )
+                elif mode == "keywords":
+                    n_keywords = config.get("nKeywords", 5)
+                    kw_type = config.get("keywordType", "unesco")
+                    results = cmbagent.get_keywords(task, n_keywords=n_keywords, kw_type=kw_type)
                 else:
                     # One Shot mode
                     results = cmbagent.one_shot(
@@ -1667,7 +1822,7 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
 
         # Sync backend files (chats, cost, time) to frontend
         files_synced, file_entries = await sync_backend_files_to_frontend(
-            websocket, task_work_dir, mode=mode
+            websocket, task_work_dir, mode=mode, config=config, user_id=user_id
         )
 
         # Register synced files in Firestore
