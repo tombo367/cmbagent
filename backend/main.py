@@ -1210,8 +1210,8 @@ async def sync_backend_files_to_frontend(
                 logger.info(f"Syncing special file: {rel_path}")
                 await sync_file(file_path, rel_path)
 
-    # Sync OCR-specific files and directories
-    if mode == 'ocr':
+    # Sync OCR and enhance-input specific files and directories
+    if mode in ('ocr', 'enhance-input'):
         # Sync ocr_cost.json
         ocr_cost_file = os.path.join(work_dir, 'ocr_cost.json')
         if os.path.exists(ocr_cost_file):
@@ -1228,6 +1228,24 @@ async def sync_backend_files_to_frontend(
                         file_path = os.path.join(root, filename)
                         relative_path = os.path.relpath(file_path, work_dir)
                         await sync_file(file_path, relative_path)
+
+    # Sync enhance-input specific files and directories
+    if mode == 'enhance-input':
+        # Sync enhanced_input.md
+        enhanced_input_file = os.path.join(work_dir, 'enhanced_input.md')
+        if os.path.exists(enhanced_input_file):
+            logger.info("Syncing enhanced_input.md")
+            await sync_file(enhanced_input_file, 'enhanced_input.md')
+
+        # Sync summaries/ directory (per-paper summaries and cost reports)
+        summaries_dir = os.path.join(work_dir, 'summaries')
+        if os.path.exists(summaries_dir):
+            logger.info("Syncing summaries/ directory")
+            for root, _, files in os.walk(summaries_dir):
+                for filename in files:
+                    file_path = os.path.join(root, filename)
+                    relative_path = os.path.relpath(file_path, work_dir)
+                    await sync_file(file_path, relative_path)
 
     if files_synced > 0:
         logger.info(f"Synced {files_synced} files from backend to frontend (mode={mode})")
@@ -1618,6 +1636,10 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                 cleanup_dirs.append(os.path.join(task_work_dir, "docs"))
             if mode in ("enhance-input", "ocr"):
                 cleanup_dirs.append(os.path.join(task_work_dir, "uploads"))
+            if mode == "enhance-input":
+                cleanup_dirs.append(os.path.join(task_work_dir, "docs"))
+                cleanup_dirs.append(os.path.join(task_work_dir, "docs_processed"))
+                cleanup_dirs.append(os.path.join(task_work_dir, "summaries"))
             for d in cleanup_dirs:
                 if os.path.exists(d):
                     shutil.rmtree(d)
