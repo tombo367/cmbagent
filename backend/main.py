@@ -1609,7 +1609,20 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
             "type": "complete",
             "message": "Task execution completed successfully"
         })
-        
+
+        # Clean up server-side files that have been synced to the frontend
+        if mode in ("arxiv", "enhance-input", "ocr"):
+            import shutil
+            cleanup_dirs = []
+            if mode == "arxiv":
+                cleanup_dirs.append(os.path.join(task_work_dir, "docs"))
+            if mode in ("enhance-input", "ocr"):
+                cleanup_dirs.append(os.path.join(task_work_dir, "uploads"))
+            for d in cleanup_dirs:
+                if os.path.exists(d):
+                    shutil.rmtree(d)
+                    logger.info(f"Cleaned up server-side directory: {d}")
+
     except Exception as e:
         error_msg = f"Error executing CMBAgent task: {str(e)}"
         print(error_msg)
