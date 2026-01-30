@@ -1020,6 +1020,21 @@ async def websocket_endpoint(websocket: WebSocket, task_id: str, token: Optional
                 else:
                     logger.warning(f"Some packages failed to install: {failed}")
 
+            elif msg_type == "clear_denario_project":
+                # Clear a Denario project's persistent directory on the server
+                project_name = data.get("projectName", "")
+                if project_name:
+                    import shutil as _shutil
+                    user_id_for_clear = getattr(user, 'uid', None) or "anonymous"
+                    persistent_dir = os.path.join(CMBAGENT_WORK_DIR, user_id_for_clear, "denario", project_name)
+                    if os.path.exists(persistent_dir):
+                        _shutil.rmtree(persistent_dir)
+                        logger.info(f"Cleared denario project: {persistent_dir}")
+                    await websocket.send_json({
+                        "type": "project_cleared",
+                        "projectName": project_name,
+                    })
+
             else:
                 logger.warning(f"Unknown message type: {msg_type}")
 
@@ -1326,17 +1341,20 @@ async def sync_backend_files_to_frontend(
                     relative_path = os.path.relpath(file_path, work_dir)
                     await sync_file(file_path, relative_path)
 
-    # Sync Denario project files (inside task_work_dir/denario/)
+    # Sync Denario project files from persistent dir (not task dir)
+    # This ensures the user gets the complete project state after each step
     denario_modes = {'idea-fast', 'idea', 'literature-search', 'methods-fast', 'methods', 'paper', 'review'}
     if mode in denario_modes and config:
-        denario_base = os.path.join(work_dir, "denario")
-        if os.path.exists(denario_base):
-            logger.info(f"Syncing Denario project directory: {denario_base}")
-            for root, _, files in os.walk(denario_base):
+        project_name = config.get("projectName", "default")
+        user_work_dir = os.path.join(CMBAGENT_WORK_DIR, user_id) if user_id else work_dir
+        persistent_denario = os.path.join(user_work_dir, "denario", project_name)
+        if os.path.exists(persistent_denario):
+            logger.info(f"Syncing Denario project from persistent dir: {persistent_denario}")
+            for root, _, files in os.walk(persistent_denario):
                 for filename in files:
                     file_path = os.path.join(root, filename)
-                    # Relative path from task_work_dir gives denario/{project_name}/...
-                    relative_path = os.path.relpath(file_path, work_dir)
+                    # Relative to user_work_dir gives denario/{project}/...
+                    relative_path = os.path.relpath(file_path, user_work_dir)
                     await sync_file(file_path, relative_path)
 
     if files_synced > 0:
@@ -1421,7 +1439,8 @@ def _setup_denario_task_dir(task_work_dir: str, user_work_dir: str, project_name
     """Set up a task-specific Denario project directory.
 
     Creates the denario project structure inside task_work_dir and copies
-    existing input_files from the persistent dir for cross-step dependencies.
+    the full persistent project for cross-step dependencies (input_files,
+    paper_output, idea_output, methods_output, etc.).
 
     Args:
         task_work_dir: Task-specific work directory ({base}/{user_id}/{task_id}).
@@ -1434,26 +1453,22 @@ def _setup_denario_task_dir(task_work_dir: str, user_work_dir: str, project_name
 
     persistent_dir = os.path.join(user_work_dir, "denario", project_name)
     task_project_dir = os.path.join(task_work_dir, "denario", project_name)
-    os.makedirs(task_project_dir, exist_ok=True)
 
-    # Copy input_files from persistent dir (for cross-step dependencies)
     if os.path.exists(persistent_dir):
-        for item in os.listdir(persistent_dir):
-            item_path = os.path.join(persistent_dir, item)
-            if os.path.isdir(item_path) and item.startswith("Iteration"):
-                input_files_src = os.path.join(item_path, "input_files")
-                if os.path.exists(input_files_src):
-                    input_files_dst = os.path.join(task_project_dir, item, "input_files")
-                    shutil.copytree(input_files_src, input_files_dst, dirs_exist_ok=True)
+        # Copy entire persistent project into task dir
+        shutil.copytree(persistent_dir, task_project_dir, dirs_exist_ok=True)
+    else:
+        os.makedirs(task_project_dir, exist_ok=True)
 
     return task_project_dir
 
 
-def _persist_denario_input_files(task_work_dir: str, user_work_dir: str, project_name: str):
-    """Copy input_files from task-specific dir back to persistent dir.
+def _persist_denario_project(task_work_dir: str, user_work_dir: str, project_name: str):
+    """Copy full denario project from task dir to persistent dir.
 
-    This makes outputs from this step available for subsequent pipeline steps
-    in future tasks.
+    This makes all outputs from this step (input_files, paper_output,
+    idea_output, methods_output, etc.) available for subsequent pipeline
+    steps in future tasks.
 
     Args:
         task_work_dir: Task-specific work directory ({base}/{user_id}/{task_id}).
@@ -1464,16 +1479,12 @@ def _persist_denario_input_files(task_work_dir: str, user_work_dir: str, project
 
     task_project_dir = os.path.join(task_work_dir, "denario", project_name)
     persistent_dir = os.path.join(user_work_dir, "denario", project_name)
-    os.makedirs(persistent_dir, exist_ok=True)
 
-    if os.path.exists(task_project_dir):
-        for item in os.listdir(task_project_dir):
-            item_path = os.path.join(task_project_dir, item)
-            if os.path.isdir(item_path) and item.startswith("Iteration"):
-                input_files_src = os.path.join(item_path, "input_files")
-                if os.path.exists(input_files_src):
-                    input_files_dst = os.path.join(persistent_dir, item, "input_files")
-                    shutil.copytree(input_files_src, input_files_dst, dirs_exist_ok=True)
+    if not os.path.exists(task_project_dir):
+        return
+
+    # Copy everything from the task project dir to persistent dir
+    shutil.copytree(task_project_dir, persistent_dir, dirs_exist_ok=True)
 
 
 def _save_data_description(project_dir: str, text: str, iteration: int = 0):
@@ -1910,7 +1921,7 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                 # Persist denario input_files for cross-step dependencies
                 _denario_persist_modes = {'idea-fast', 'idea', 'literature-search', 'methods-fast', 'methods', 'paper', 'review'}
                 if mode in _denario_persist_modes:
-                    _persist_denario_input_files(task_work_dir, work_dir, config.get("projectName", "default"))
+                    _persist_denario_project(task_work_dir, work_dir, config.get("projectName", "default"))
 
                 return results
 
