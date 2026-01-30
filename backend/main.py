@@ -1446,6 +1446,13 @@ async def sync_backend_files_to_frontend(
                     relative_path = os.path.relpath(file_path, work_dir)
                     await sync_file(file_path, relative_path)
 
+    # Sync keywords output
+    if mode == 'keywords':
+        keywords_file = os.path.join(work_dir, 'keywords.md')
+        if os.path.exists(keywords_file):
+            logger.info("Syncing keywords.md")
+            await sync_file(keywords_file, 'keywords.md')
+
     # Sync Denario project files from persistent dir (not task dir)
     # This ensures the user gets the complete project state after each step
     denario_modes = {'idea-fast', 'idea', 'literature-search', 'methods-fast', 'methods', 'paper', 'review'}
