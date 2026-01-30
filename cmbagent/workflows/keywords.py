@@ -20,6 +20,34 @@ from ..utils import (
 from ..utils.keywords_utils import UnescoKeywords, AaaiKeywords
 
 
+def _save_keywords_md(keywords, kw_type, input_text, work_dir):
+    """Save extracted keywords to a markdown file in work_dir."""
+    md_path = os.path.join(work_dir, "keywords.md")
+    lines = [
+        f"# Keywords ({kw_type.upper()})",
+        "",
+        f"**Input:** {input_text[:200]}{'...' if len(input_text) > 200 else ''}",
+        "",
+        "## Extracted Keywords",
+        "",
+    ]
+    if isinstance(keywords, dict):
+        # AAS format: dict with URLs
+        for kw, url in keywords.items():
+            if url:
+                lines.append(f"- [{kw}]({url})")
+            else:
+                lines.append(f"- {kw}")
+    elif isinstance(keywords, list):
+        for kw in keywords:
+            lines.append(f"- {kw}")
+    else:
+        lines.append(str(keywords))
+
+    with open(md_path, "w") as f:
+        f.write("\n".join(lines) + "\n")
+
+
 def get_keywords(
     input_text: str,
     n_keywords: int = 5,
@@ -59,7 +87,9 @@ def get_keywords(
     ['COMPUTER SCIENCE', 'ARTIFICIAL INTELLIGENCE', ...]
     """
     if kw_type == 'aas':
-        return get_aas_keywords(input_text, n_keywords, work_dir, api_keys)
+        keywords = get_aas_keywords(input_text, n_keywords, work_dir, api_keys)
+        _save_keywords_md(keywords, kw_type, input_text, work_dir)
+        return keywords
     elif kw_type == 'unesco':
         aggregated_keywords = []
 
@@ -100,9 +130,12 @@ def get_keywords(
 
         print('keywords in unesco:')
         print(keywords)
+        _save_keywords_md(keywords, kw_type, input_text, work_dir)
         return keywords
     elif kw_type == 'aaai':
-        return get_keywords_from_aaai(input_text, n_keywords, work_dir, api_keys)
+        keywords = get_keywords_from_aaai(input_text, n_keywords, work_dir, api_keys)
+        _save_keywords_md(keywords, kw_type, input_text, work_dir)
+        return keywords
 
 
 def get_keywords_from_aaai(
