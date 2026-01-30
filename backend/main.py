@@ -1455,7 +1455,7 @@ async def sync_backend_files_to_frontend(
 
     # Sync Denario project files from persistent dir (not task dir)
     # This ensures the user gets the complete project state after each step
-    denario_modes = {'idea-fast', 'idea', 'literature-search', 'methods-fast', 'methods', 'paper', 'review'}
+    denario_modes = {'idea-fast', 'idea', 'literature-search', 'methods-fast', 'methods', 'analysis', 'paper', 'review'}
     if mode in denario_modes and config:
         project_name = config.get("projectName", "default")
         user_work_dir = os.path.join(CMBAGENT_WORK_DIR, user_id) if user_id else work_dir
@@ -1753,7 +1753,7 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                 "type": "output",
                 "data": f"⚙️ Configuration: Enhance Input mode - Max Workers={max_workers}, Max Depth={max_depth}"
             })
-        elif mode in ("idea-fast", "idea", "literature-search", "methods-fast", "methods", "paper", "review"):
+        elif mode in ("idea-fast", "idea", "literature-search", "methods-fast", "methods", "analysis", "paper", "review"):
             project_name = config.get("projectName", "default")
             await websocket.send_json({
                 "type": "output",
@@ -1984,6 +1984,52 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                     with open(methods_path, 'w') as f:
                         f.write(methodology)
                     results = {"methodology": methodology}
+                elif mode == "analysis":
+                    # Analysis mode - runs experiment via Denario Experiment class
+                    from denario.cmbagent_agents.experiment import Experiment
+                    project_name = config.get("projectName", "default")
+                    project_dir = _setup_denario_task_dir(task_work_dir, work_dir, project_name)
+                    project_iteration = config.get("projectIteration", 0)
+                    if task.strip():
+                        _save_data_description(project_dir, task, project_iteration)
+                    working_dir = os.path.join(project_dir, f"Iteration{project_iteration}")
+                    input_dir = os.path.join(working_dir, "input_files")
+                    # Read required input files from previous steps
+                    with open(os.path.join(input_dir, "idea.md"), 'r') as f:
+                        research_idea = f.read()
+                    with open(os.path.join(input_dir, "data_description.md"), 'r') as f:
+                        data_description = f.read()
+                    with open(os.path.join(input_dir, "methods.md"), 'r') as f:
+                        methodology = f.read()
+                    denario_params = _build_denario_params(config)
+                    analysis_params = denario_params.get('Analysis module', {})
+                    experiment = Experiment(
+                        research_idea=research_idea,
+                        methodology=methodology,
+                        keys=_build_denario_keys(),
+                        work_dir=working_dir,
+                        engineer_model=analysis_params.get('engineer', {}).get('model', config.get("defaultModel", "gpt-4.1-2025-04-14")),
+                        researcher_model=analysis_params.get('researcher', {}).get('model', config.get("defaultModel", "gpt-4.1-2025-04-14")),
+                        planner_model=analysis_params.get('planner', {}).get('model', "gpt-4o"),
+                        plan_reviewer_model=analysis_params.get('plan_reviewer', {}).get('model', "o3-mini"),
+                        orchestration_model=analysis_params.get('orchestration', {}).get('model', config.get("defaultModel", "gpt-4.1")),
+                        formatter_model=analysis_params.get('formatter', {}).get('model', config.get("defaultFormatterModel", "o3-mini")),
+                        max_n_attempts=config.get("maxAttempts", 10),
+                        max_n_steps=config.get("maxSteps", 6),
+                    )
+                    experiment.run_experiment(data_description)
+                    # Save results.md
+                    results_path = os.path.join(input_dir, "results.md")
+                    with open(results_path, 'w') as f:
+                        f.write(experiment.results)
+                    # Move plots to plots folder
+                    import shutil as _shutil
+                    plots_dir = os.path.join(input_dir, "plots")
+                    os.makedirs(plots_dir, exist_ok=True)
+                    for plot_path in getattr(experiment, 'plot_paths', []):
+                        if os.path.exists(plot_path):
+                            _shutil.move(plot_path, plots_dir)
+                    results = {"results": experiment.results}
                 elif mode == "paper":
                     from denario.langgraph_agents.modules import paper_LG
                     from denario.tools import Journal
@@ -2031,7 +2077,7 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                     )
                 
                 # Persist denario input_files for cross-step dependencies
-                _denario_persist_modes = {'idea-fast', 'idea', 'literature-search', 'methods-fast', 'methods', 'paper', 'review'}
+                _denario_persist_modes = {'idea-fast', 'idea', 'literature-search', 'methods-fast', 'methods', 'analysis', 'paper', 'review'}
                 if mode in _denario_persist_modes:
                     _persist_denario_project(task_work_dir, work_dir, config.get("projectName", "default"))
 
