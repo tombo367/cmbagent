@@ -1326,24 +1326,17 @@ async def sync_backend_files_to_frontend(
                     relative_path = os.path.relpath(file_path, work_dir)
                     await sync_file(file_path, relative_path)
 
-    # Sync Denario project files
+    # Sync Denario project files (inside task_work_dir/denario/)
     denario_modes = {'idea-fast', 'idea', 'literature-search', 'methods-fast', 'methods', 'paper', 'review'}
     if mode in denario_modes and config:
-        project_name = config.get("projectName", "default")
-        # work_dir is task_work_dir = {base}/{user_id}/{task_id}
-        # Go up to {base}/{user_id} then into denario/{project_name}
-        user_work_dir = os.path.dirname(work_dir)
-        project_dir = os.path.join(user_work_dir, "denario", project_name)
-        if os.path.exists(project_dir):
-            logger.info(f"Syncing Denario project directory: {project_dir}")
-            for root, _, files in os.walk(project_dir):
+        denario_base = os.path.join(work_dir, "denario")
+        if os.path.exists(denario_base):
+            logger.info(f"Syncing Denario project directory: {denario_base}")
+            for root, _, files in os.walk(denario_base):
                 for filename in files:
                     file_path = os.path.join(root, filename)
-                    # Use denario/{projectName}/... as the relative path
-                    relative_path = os.path.join(
-                        "denario", project_name,
-                        os.path.relpath(file_path, project_dir)
-                    )
+                    # Relative path from task_work_dir gives denario/{project_name}/...
+                    relative_path = os.path.relpath(file_path, work_dir)
                     await sync_file(file_path, relative_path)
 
     if files_synced > 0:
@@ -1422,6 +1415,65 @@ def _get_denario_project_dir(user_work_dir: str, project_name: str) -> str:
     project_dir = os.path.join(user_work_dir, "denario", project_name)
     os.makedirs(project_dir, exist_ok=True)
     return project_dir
+
+
+def _setup_denario_task_dir(task_work_dir: str, user_work_dir: str, project_name: str) -> str:
+    """Set up a task-specific Denario project directory.
+
+    Creates the denario project structure inside task_work_dir and copies
+    existing input_files from the persistent dir for cross-step dependencies.
+
+    Args:
+        task_work_dir: Task-specific work directory ({base}/{user_id}/{task_id}).
+        user_work_dir: User-level work directory ({base}/{user_id}).
+        project_name: The project name chosen by the user.
+
+    Returns: {task_work_dir}/denario/{project_name}
+    """
+    import shutil
+
+    persistent_dir = os.path.join(user_work_dir, "denario", project_name)
+    task_project_dir = os.path.join(task_work_dir, "denario", project_name)
+    os.makedirs(task_project_dir, exist_ok=True)
+
+    # Copy input_files from persistent dir (for cross-step dependencies)
+    if os.path.exists(persistent_dir):
+        for item in os.listdir(persistent_dir):
+            item_path = os.path.join(persistent_dir, item)
+            if os.path.isdir(item_path) and item.startswith("Iteration"):
+                input_files_src = os.path.join(item_path, "input_files")
+                if os.path.exists(input_files_src):
+                    input_files_dst = os.path.join(task_project_dir, item, "input_files")
+                    shutil.copytree(input_files_src, input_files_dst, dirs_exist_ok=True)
+
+    return task_project_dir
+
+
+def _persist_denario_input_files(task_work_dir: str, user_work_dir: str, project_name: str):
+    """Copy input_files from task-specific dir back to persistent dir.
+
+    This makes outputs from this step available for subsequent pipeline steps
+    in future tasks.
+
+    Args:
+        task_work_dir: Task-specific work directory ({base}/{user_id}/{task_id}).
+        user_work_dir: User-level work directory ({base}/{user_id}).
+        project_name: The project name chosen by the user.
+    """
+    import shutil
+
+    task_project_dir = os.path.join(task_work_dir, "denario", project_name)
+    persistent_dir = os.path.join(user_work_dir, "denario", project_name)
+    os.makedirs(persistent_dir, exist_ok=True)
+
+    if os.path.exists(task_project_dir):
+        for item in os.listdir(task_project_dir):
+            item_path = os.path.join(task_project_dir, item)
+            if os.path.isdir(item_path) and item.startswith("Iteration"):
+                input_files_src = os.path.join(item_path, "input_files")
+                if os.path.exists(input_files_src):
+                    input_files_dst = os.path.join(persistent_dir, item, "input_files")
+                    shutil.copytree(input_files_src, input_files_dst, dirs_exist_ok=True)
 
 
 def _save_data_description(project_dir: str, text: str, iteration: int = 0):
@@ -1718,7 +1770,7 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                 elif mode == "idea-fast":
                     from denario.langgraph_agents.modules import idea_LG
                     project_name = config.get("projectName", "default")
-                    project_dir = _get_denario_project_dir(work_dir, project_name)
+                    project_dir = _setup_denario_task_dir(task_work_dir, work_dir, project_name)
                     project_iteration = config.get("projectIteration", 0)
                     _save_data_description(project_dir, task, project_iteration)
                     results = idea_LG(
@@ -1732,7 +1784,7 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                     # Planning & Control idea generation via Denario Idea class
                     from denario.cmbagent_agents.idea import Idea
                     project_name = config.get("projectName", "default")
-                    project_dir = _get_denario_project_dir(work_dir, project_name)
+                    project_dir = _setup_denario_task_dir(task_work_dir, work_dir, project_name)
                     project_iteration = config.get("projectIteration", 0)
                     _save_data_description(project_dir, task, project_iteration)
                     working_dir = os.path.join(project_dir, f"Iteration{project_iteration}")
@@ -1754,7 +1806,7 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                 elif mode == "literature-search":
                     from denario.langgraph_agents.modules import literature_LG
                     project_name = config.get("projectName", "default")
-                    project_dir = _get_denario_project_dir(work_dir, project_name)
+                    project_dir = _setup_denario_task_dir(task_work_dir, work_dir, project_name)
                     if task.strip():
                         _save_data_description(project_dir, task, config.get("projectIteration", 0))
                     results = literature_LG(
@@ -1767,7 +1819,7 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                 elif mode == "methods-fast":
                     from denario.langgraph_agents.modules import methods_LG
                     project_name = config.get("projectName", "default")
-                    project_dir = _get_denario_project_dir(work_dir, project_name)
+                    project_dir = _setup_denario_task_dir(task_work_dir, work_dir, project_name)
                     if task.strip():
                         _save_data_description(project_dir, task, config.get("projectIteration", 0))
                     results = methods_LG(
@@ -1780,7 +1832,7 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                     # Planning & Control methods generation via Denario Method class
                     from denario.cmbagent_agents.method import Method
                     project_name = config.get("projectName", "default")
-                    project_dir = _get_denario_project_dir(work_dir, project_name)
+                    project_dir = _setup_denario_task_dir(task_work_dir, work_dir, project_name)
                     project_iteration = config.get("projectIteration", 0)
                     if task.strip():
                         _save_data_description(project_dir, task, project_iteration)
@@ -1811,7 +1863,7 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                     from denario.langgraph_agents.modules import paper_LG
                     from denario.tools import Journal
                     project_name = config.get("projectName", "default")
-                    project_dir = _get_denario_project_dir(work_dir, project_name)
+                    project_dir = _setup_denario_task_dir(task_work_dir, work_dir, project_name)
                     journal = getattr(Journal, config.get("journal", "NONE"), Journal.NONE)
                     results = paper_LG(
                         project_dir=project_dir,
@@ -1825,7 +1877,7 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                 elif mode == "review":
                     from denario.langgraph_agents.modules import reviewer_LG
                     project_name = config.get("projectName", "default")
-                    project_dir = _get_denario_project_dir(work_dir, project_name)
+                    project_dir = _setup_denario_task_dir(task_work_dir, work_dir, project_name)
                     results = reviewer_LG(
                         project_dir=project_dir,
                         keys=_build_denario_keys(),
@@ -1853,8 +1905,13 @@ async def execute_cmbagent_task(websocket: WebSocket, task_id: str, task: str, c
                         custom_executor=custom_executor
                     )
                 
+                # Persist denario input_files for cross-step dependencies
+                _denario_persist_modes = {'idea-fast', 'idea', 'literature-search', 'methods-fast', 'methods', 'paper', 'review'}
+                if mode in _denario_persist_modes:
+                    _persist_denario_input_files(task_work_dir, work_dir, config.get("projectName", "default"))
+
                 return results
-                
+
             finally:
                 # Restore original print and streams
                 builtins.print = original_print
