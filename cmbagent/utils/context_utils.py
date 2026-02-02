@@ -97,7 +97,7 @@ def get_context_for_agent(
     Parameters
     ----------
     agent : str
-        The agent name (e.g., 'camb_context', 'classy_context')
+        The agent name (e.g., 'camb_context')
     context_urls : dict, optional
         Dictionary mapping agent names to their context URLs.
         If None, returns None.
@@ -110,10 +110,9 @@ def get_context_for_agent(
 
     Examples
     --------
-    >>> from cmbagent.utils import camb_context_url, classy_context_url
+    >>> from cmbagent.utils import camb_context_url
     >>> urls = {
     ...     'camb_context': camb_context_url,
-    ...     'classy_context': classy_context_url
     ... }
     >>> config = get_context_for_agent('camb_context', urls)
     >>> config
