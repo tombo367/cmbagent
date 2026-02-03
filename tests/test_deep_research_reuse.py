@@ -12,7 +12,7 @@ In second step evaluate the function you defined in the first step (import the f
     results = cmbagent.deep_research(
         task,
         max_rounds_control=100,
-        n_plan_reviews=0,
+        n_plan_reviews=1,
         max_n_attempts=2,
         max_plan_steps=2,
         # engineer_model="gemini-3-flash-preview",

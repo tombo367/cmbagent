@@ -12,7 +12,7 @@ def test_deep_research():
     results = cmbagent.deep_research(
         task,
         max_rounds_control=100,
-        n_plan_reviews=0,
+        n_plan_reviews=1,
         max_n_attempts=2,
         max_plan_steps=3,
         # engineer_model="gemini-3-flash-preview",
